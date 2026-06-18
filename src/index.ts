@@ -1,260 +1,231 @@
 import { loadConfig, saveConfig, type Config } from "./config";
-import { COLORS, printLogo, askQuestion, askConfirm, askSelect } from "./ui";
+import { COLORS, printLogo, askQuestion, askConfirm, interactiveMenu, type MenuOption } from "./ui";
 import { runAgentLoop, type Message, SYSTEM_PROMPT } from "./agent";
 import { fetchModels } from "./models";
 import path from "path";
 
-function parseArgs() {
-  const args = process.argv.slice(2);
-  const flags = {
-    model: "",
-    baseURL: "",
-    apiKey: "",
-    autoApprove: false,
-    config: false,
-    help: false,
-  };
-  const messageParts: string[] = [];
+const COMMANDS: { name: string; desc: string }[] = [
+  { name: "/help", desc: "Show help and commands" },
+  { name: "/model", desc: "Switch the active model" },
+  { name: "/think", desc: "Set reasoning depth" },
+  { name: "/plan", desc: "Toggle planning mode" },
+  { name: "/config", desc: "Open the setup wizard" },
+  { name: "/clear", desc: "Clear the screen" },
+  { name: "/exit", desc: "Quit FreeCode" },
+];
 
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--model" || arg === "-m") {
-      flags.model = args[++i] || "";
-    } else if (arg === "--base-url" || arg === "-u") {
-      flags.baseURL = args[++i] || "";
-    } else if (arg === "--api-key" || arg === "-k") {
-      flags.apiKey = args[++i] || "";
-    } else if (arg === "--auto-approve" || arg === "-a") {
-      flags.autoApprove = true;
-    } else if (arg === "--config") {
-      flags.config = true;
-    } else if (arg === "--help" || arg === "-h") {
-      flags.help = true;
-    } else {
-      messageParts.push(arg);
+// Resolve user input starting with "/" into a full command string.
+// Exact match -> as typed; unique prefix -> autocompleted; else open palette.
+async function resolveCommand(input: string): Promise<string | null> {
+  const trimmed = input.trim();
+  const [head, ...rest] = trimmed.split(/\s+/);
+  const args = rest.join(" ");
+  const exact = COMMANDS.find((c) => c.name === head);
+  if (exact) return args ? `${exact.name} ${args}` : exact.name;
+
+  const matches = COMMANDS.filter((c) => c.name.startsWith(head));
+  if (matches.length === 1) return args ? `${matches[0].name} ${args}` : matches[0].name;
+
+  const pool = matches.length > 0 ? matches : COMMANDS;
+  const options: MenuOption<string>[] = pool.map((c) => ({
+    label: c.name,
+    value: c.name,
+    hint: c.desc,
+  }));
+  const picked = await interactiveMenu<string>("Commands", options, { filterable: true });
+  if (!picked) return null;
+  return args ? `${picked} ${args}` : picked;
+}
+
+async function handleModelCommand(parts: string[], config: Config): Promise<Config> {
+  const sub = parts[1];
+  if (sub === "add") {
+    const name = await askQuestion("Model display name: ");
+    const id = await askQuestion("Model id: ");
+    if (name.trim() && id.trim()) {
+      config.customModels = [...(config.customModels || []), { name: name.trim(), id: id.trim() }];
+      saveConfig(config);
+      console.log(`${COLORS.green}Added model ${name.trim()}.${COLORS.reset}`);
     }
+    return config;
+  }
+  if (sub && sub !== "list") {
+    config.model = parts.slice(1).join(" ");
+    saveConfig(config);
+    console.log(`${COLORS.green}Model set to ${config.model}.${COLORS.reset}`);
+    return config;
   }
 
-  return { flags, message: messageParts.join(" ") };
+  let apiModels: string[] = [];
+  try { apiModels = await fetchModels(config); } catch {}
+  const custom = (config.customModels || []).map((m) => ({
+    label: m.name, value: m.id, hint: m.id,
+  }));
+  const options: MenuOption<string>[] = [
+    ...apiModels.map((m) => ({ label: m, value: m, hint: "api" })),
+    ...custom,
+  ];
+
+  if (options.length === 0) {
+    console.log(`${COLORS.gray}No models available. Use "/model add".${COLORS.reset}`);
+    return config;
+  }
+  const current = options.findIndex((o) => o.value === config.model);
+  const picked = await interactiveMenu<string>("Select active model", options, {
+    filterable: true,
+    initialIndex: current >= 0 ? current : 0,
+  });
+  if (picked) {
+    config.model = picked;
+    saveConfig(config);
+    console.log(`${COLORS.green}Model set to ${picked}.${COLORS.reset}`);
+  }
+  return config;
+}
+
+async function handleCommand(input: string, config: Config): Promise<{ config: Config; exit: boolean }> {
+  const parts = input.trim().split(/\s+/);
+  const cmd = parts[0];
+  switch (cmd) {
+    case "/exit":
+      return { config, exit: true };
+    case "/help":
+      showHelp();
+      return { config, exit: false };
+    case "/clear":
+      console.clear();
+      printLogo(config.model, config.baseURL);
+      return { config, exit: false };
+    case "/config":
+      config = await runSetup(config);
+      return { config, exit: false };
+    case "/plan":
+      config.planningMode = !config.planningMode;
+      saveConfig(config);
+      console.log(`${COLORS.green}Planning mode ${config.planningMode ? "on" : "off"}.${COLORS.reset}`);
+      return { config, exit: false };
+    case "/model":
+      config = await handleModelCommand(parts, config);
+      return { config, exit: false };
+
+    case "/think": {
+      const levels: MenuOption<string>[] = [
+        { label: "none", value: "none", hint: "no extra reasoning" },
+        { label: "low", value: "low", hint: "brief reasoning" },
+        { label: "medium", value: "medium", hint: "balanced" },
+        { label: "high", value: "high", hint: "deep reasoning" },
+        { label: "max", value: "max", hint: "maximum reasoning" },
+      ];
+      const cur = levels.findIndex((l) => l.value === config.thinkingLevel);
+      const picked = await interactiveMenu<string>("Reasoning depth", levels, {
+        initialIndex: cur >= 0 ? cur : 2,
+      });
+      if (picked) {
+        config.thinkingLevel = picked;
+        saveConfig(config);
+        console.log(`${COLORS.green}Reasoning set to ${picked}.${COLORS.reset}`);
+      }
+      return { config, exit: false };
+    }
+    default:
+      console.log(`${COLORS.red}Unknown command: ${cmd}${COLORS.reset} ${COLORS.gray}(type / and press Enter to browse)${COLORS.reset}`);
+      return { config, exit: false };
+  }
 }
 
 function showHelp() {
-  console.log(`
-  ${COLORS.bold}APEX Agent - Claude Code style terminal assistant${COLORS.reset}
-
-  ${COLORS.bold}Usage:${COLORS.reset}
-    ./apex                            Start interactive session
-    ./apex <message>                  Run single message and exit
-    ./apex --config                   Configure API settings
-
-  ${COLORS.bold}Options:${COLORS.reset}
-    -m, --model <name>                Override API model
-    -u, --base-url <url>              Override API base URL
-    -k, --api-key <key>               Override API key
-    -a, --auto-approve                Auto-approve all tool calls
-    -h, --help                        Show this help message
-
-  ${COLORS.bold}Interactive Commands:${COLORS.reset}
-    /help                             Show help text
-    /config                           Open setup wizard
-    /clear                            Clear terminal screen
-    /exit                             Exit interactive assistant
-    /plan                             Toggle planning mode
-    /think [level]                    Set thinking level (none, low, medium, high, max)
-    /model                            Select active model
-    /model list                       List available models
-    /model add <name> <id>            Add a custom model
-  `);
+  console.log(`\n${COLORS.bold}${COLORS.orange}FreeCode${COLORS.reset} ${COLORS.gray}- Claude Code-style coding agent${COLORS.reset}\n`);
+  console.log(`${COLORS.bold}Usage${COLORS.reset}`);
+  console.log(`  Type a request and press Enter to chat with the agent.`);
+  console.log(`  Type ${COLORS.orange}/${COLORS.reset} and press Enter to browse slash commands.\n`);
+  console.log(`${COLORS.bold}Slash commands${COLORS.reset}`);
+  for (const c of COMMANDS) {
+    console.log(`  ${COLORS.orange}${c.name.padEnd(10)}${COLORS.reset} ${COLORS.gray}${c.desc}${COLORS.reset}`);
+  }
+  console.log(`\n${COLORS.bold}Navigation${COLORS.reset}`);
+  console.log(`  ${COLORS.gray}Use \u2191/\u2193 to move, \u21b5 to select, esc to cancel in any menu.${COLORS.reset}\n`);
 }
 
-async function runSetup(current: Config) {
-  console.log(`\n${COLORS.bold}${COLORS.cyan}[Config] APEX Config Wizard${COLORS.reset}`);
-  console.log(`${COLORS.gray}Configure your OpenAI-compatible endpoint below.${COLORS.reset}\n`);
+async function runSetup(config: Config): Promise<Config> {
+  console.log(`\n${COLORS.bold}${COLORS.orange}[Config] FreeCode Config Wizard${COLORS.reset}\n`);
+  const baseURL = await askQuestion(`API base URL ${COLORS.gray}(${config.baseURL})${COLORS.reset}: `);
+  if (baseURL.trim()) config.baseURL = baseURL.trim();
+  const apiKey = await askQuestion(`API key ${COLORS.gray}(${config.apiKey ? "set" : "empty"})${COLORS.reset}: `);
+  if (apiKey.trim()) config.apiKey = apiKey.trim();
 
-  const baseURL = await askQuestion(`Base URL [${current.baseURL}]: `);
-  const currentKeyDisplay = current.apiKey 
-    ? `ends in ...${current.apiKey.slice(-4)}`
-    : "none";
-  const apiKey = await askQuestion(`API Key [${currentKeyDisplay}]: `);
-  const model = await askQuestion(`Model [${current.model}]: `);
-  const autoApprove = await askConfirm(`Auto-approve file modifications?`, current.autoApprove);
+  config.autoApprove = await askConfirm("Auto-approve tool actions?", config.autoApprove);
+  config.planningMode = await askConfirm("Enable planning mode?", config.planningMode);
 
-  const nextConfig: Config = {
-    ...current,
-    baseURL: baseURL.trim() || current.baseURL,
-    apiKey: apiKey.trim() || current.apiKey,
-    model: model.trim() || current.model,
-    autoApprove,
-  };
+  const levels: MenuOption<Config["thinkingLevel"]>[] = [
+    { label: "none", value: "none", hint: "no extra reasoning" },
+    { label: "low", value: "low", hint: "brief reasoning" },
+    { label: "medium", value: "medium", hint: "balanced" },
+    { label: "high", value: "high", hint: "deep reasoning" },
+    { label: "max", value: "max", hint: "maximum reasoning" },
+  ];
+  const curLevel = levels.findIndex((l) => l.value === config.thinkingLevel);
+  const lvl = await interactiveMenu("Reasoning depth", levels, {
+    initialIndex: curLevel >= 0 ? curLevel : 2,
+  });
+  if (lvl) config.thinkingLevel = lvl;
 
-  await saveConfig(nextConfig);
-  console.log(`\n${COLORS.green}[OK] Settings updated and saved!${COLORS.reset}\n`);
-  return nextConfig;
+  await saveConfig(config);
+  console.log(`${COLORS.green}Configuration saved.${COLORS.reset}\n`);
+  return config;
 }
 
 async function main() {
-  const { flags, message } = parseArgs();
-
-  if (flags.help) {
-    showHelp();
-    process.exit(0);
-  }
-
   let config = await loadConfig();
+  const argv = process.argv.slice(2);
 
-  if (flags.config) {
-    await runSetup(config);
-    process.exit(0);
+  if (argv[0] === "--help" || argv[0] === "-h") {
+    showHelp();
+    return;
+  }
+  if (argv[0] === "config" || argv[0] === "setup") {
+    config = await runSetup(config);
+    return;
   }
 
-  if (flags.model) config.model = flags.model;
-  if (flags.baseURL) config.baseURL = flags.baseURL;
-  if (flags.apiKey) config.apiKey = flags.apiKey;
-  if (flags.autoApprove) config.autoApprove = true;
-
-  if (!config.apiKey && config.baseURL.includes("openai.com")) {
-    console.log(`${COLORS.yellow}[WARN] No API key found for OpenAI endpoint.${COLORS.reset}`);
-    const setupNow = await askConfirm("Would you like to run the config wizard now?");
-    if (setupNow) {
-      config = await runSetup(config);
-    } else {
-      console.log(`${COLORS.bold}Continuing without API key...${COLORS.reset}`);
-    }
+  if (!config.apiKey) {
+    console.log(`${COLORS.gray}No API key found. Starting setup.${COLORS.reset}`);
+    config = await runSetup(config);
   }
 
-  if (message.trim().length > 0) {
-    console.log(`${COLORS.gray}[INFO] Executing single instruction...${COLORS.reset}`);
-    const messages: Message[] = [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: message },
-    ];
+  // One-shot mode: pass a prompt as arguments to run once and exit.
+  if (argv.length > 0) {
+    const messages: Message[] = [{ role: "user", content: argv.join(" ") }];
     await runAgentLoop(messages, config);
-    process.exit(0);
+    return;
   }
-
-  const messages: Message[] = [
-    { role: "system", content: SYSTEM_PROMPT }
-  ];
 
   printLogo(config.model, config.baseURL);
-  console.log(`Type your prompt and press ${COLORS.bold}Enter${COLORS.reset}. Type ${COLORS.cyan}/help${COLORS.reset} for command details.\n`);
+  console.log(`${COLORS.gray}Type ${COLORS.orange}/${COLORS.gray} and press Enter to browse commands. Type your request to start.${COLORS.reset}\n`);
 
+  const messages: Message[] = [];
   while (true) {
-    const relativeCwd = path.basename(process.cwd()) || "/";
-    const prompt = `${COLORS.bold}${COLORS.green}apex${COLORS.reset} ${COLORS.dim}(${config.model})${COLORS.reset} ${COLORS.cyan}${relativeCwd}${COLORS.reset} › `;
-    const input = await askQuestion(prompt);
+    const input = await askQuestion(`${COLORS.orange}freecode${COLORS.reset} ${COLORS.gray}\u203a${COLORS.reset} `);
     const trimmed = input.trim();
     if (!trimmed) continue;
 
     if (trimmed.startsWith("/")) {
-      const parts = trimmed.split(/\s+/);
-      const command = parts[0].toLowerCase();
-      
-      if (command === "/exit" || command === "/quit") {
-        console.log(`Goodbye!`);
-        break;
-      } else if (command === "/help") {
-        showHelp();
-      } else if (command === "/config") {
-        config = await runSetup(config);
-      } else if (command === "/clear") {
-        console.clear();
-        printLogo(config.model, config.baseURL);
-      } else if (command === "/plan") {
-        config.planningMode = !config.planningMode;
-        await saveConfig(config);
-        console.log(`Planning mode: ${config.planningMode ? "ON" : "OFF"}`);
-      } else if (command === "/think") {
-        const level = parts[1]?.toLowerCase();
-        const validLevels = ["none", "low", "medium", "high", "max"];
-        if (level && validLevels.includes(level)) {
-          config.thinkingLevel = level as any;
-          await saveConfig(config);
-          console.log(`Thinking level set to: ${config.thinkingLevel}`);
-        } else {
-          const selectOpts = validLevels.map(l => ({ label: l, value: l }));
-          const chosen = await askSelect("Select thinking level:", selectOpts);
-          config.thinkingLevel = chosen as any;
-          await saveConfig(config);
-          console.log(`Thinking level set to: ${config.thinkingLevel}`);
-        }
-      } else if (command === "/model") {
-        const sub = parts[1]?.toLowerCase();
-        if (sub === "add") {
-          const name = parts[2];
-          const id = parts[3];
-          if (!name || !id) {
-            console.log(`${COLORS.red}[ERR] Usage: /model add <name> <id>${COLORS.reset}`);
-          } else {
-            config.customModels.push({ name, id });
-            await saveConfig(config);
-            console.log(`Custom model added: ${name} (${id})`);
-          }
-        } else if (sub === "list") {
-          console.log(`\nAvailable Models:`);
-          try {
-            const apiModels = await fetchModels(config);
-            if (apiModels.length > 0) {
-              console.log(`${COLORS.bold}API Models:${COLORS.reset}`);
-              apiModels.forEach(m => console.log(`  - ${m}`));
-            }
-          } catch (e: any) {
-            console.log(`${COLORS.yellow}[WARN] Could not fetch models from API: ${e.message}${COLORS.reset}`);
-          }
-          if (config.customModels.length > 0) {
-            console.log(`${COLORS.bold}Custom Models:${COLORS.reset}`);
-            config.customModels.forEach(m => console.log(`  - ${m.name} (${m.id})`));
-          }
-          console.log(`Active model: ${COLORS.cyan}${config.model}${COLORS.reset}\n`);
-        } else if (parts[1]) {
-          const target = parts[1];
-          config.model = target;
-          await saveConfig(config);
-          console.log(`Active model changed to: ${config.model}`);
-        } else {
-          console.log(`Fetching models list...`);
-          let apiModels: string[] = [];
-          try {
-            apiModels = await fetchModels(config);
-          } catch (e: any) {
-            console.log(`${COLORS.yellow}[WARN] Could not fetch models from API: ${e.message}${COLORS.reset}`);
-          }
-          
-          const options: { label: string; value: string }[] = [];
-          apiModels.forEach(m => {
-            options.push({ label: `${m} (API)`, value: m });
-          });
-          config.customModels.forEach(m => {
-            options.push({ label: `${m.name} (${m.id}) (Custom)`, value: m.id });
-          });
-          
-          if (options.length === 0) {
-            console.log(`No models found. You can add one via: /model add <name> <id>`);
-          } else {
-            const chosen = await askSelect("Select active model:", options);
-            config.model = chosen;
-            await saveConfig(config);
-            console.log(`Active model changed to: ${config.model}`);
-          }
-        }
-      } else {
-        console.log(`${COLORS.red}Unknown command: ${command}. Type /help for assistance.${COLORS.reset}`);
-      }
+      const resolved = await resolveCommand(trimmed);
+      if (!resolved) continue;
+      const result = await handleCommand(resolved, config);
+      config = result.config;
+      if (result.exit) break;
       continue;
     }
 
-    let promptContent = trimmed;
-    if (config.planningMode) {
-      promptContent = `[Planning Mode Active] Please outline a detailed plan first using monochrome box layouts. Map out steps from research to execution and verification. Proceed with tasks step by step.\n\nUser Message: ${trimmed}`;
-    }
-    messages.push({ role: "user", content: promptContent });
-
+    messages.push({ role: "user", content: trimmed });
     await runAgentLoop(messages, config);
-    console.log();
   }
+
+  console.log(`${COLORS.gray}Goodbye.${COLORS.reset}`);
+  process.exit(0);
 }
 
-main().catch(err => {
-  console.error(`${COLORS.red}Fatal Error: ${err.message}${COLORS.reset}`);
+main().catch((err) => {
+  console.error(`${COLORS.red}Fatal error:${COLORS.reset}`, err);
   process.exit(1);
 });

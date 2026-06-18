@@ -26,7 +26,7 @@ export interface Message {
   name?: string;
 }
 
-export const SYSTEM_PROMPT = `You are APEX Agent, a direct, action-oriented AI coding assistant.
+export const SYSTEM_PROMPT = `You are FreeCode, a direct, action-oriented AI coding assistant.
 You inspect codebases, execute commands, modify files, and solve tasks directly.
 
 THINKING REQUIREMENT:

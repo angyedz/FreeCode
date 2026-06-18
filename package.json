@@ -1,15 +1,21 @@
 {
-  "name": "apex-agent",
+  "name": "freecode",
   "version": "1.0.0",
   "type": "module",
+  "bin": {
+    "freecode": "dist/freecode.mjs"
+  },
   "scripts": {
-    "start": "npx tsx src/index.ts"
+    "start": "npx tsx src/index.ts",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node18 --outfile=dist/freecode.mjs"
   },
   "dependencies": {
+    "wrangler": "^4.102.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^20.12.7",
+    "esbuild": "^0.21.5",
     "typescript": "^5.4.5"
   }
 }

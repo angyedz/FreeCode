@@ -1,0 +1,7 @@
+name = "freecode-accounts"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+[[kv_namespaces]]
+binding = "ACCOUNTS"
+id = "33275b362af445348d861b9a062e26dc"

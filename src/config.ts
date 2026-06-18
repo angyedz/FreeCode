@@ -10,6 +10,10 @@ export interface Config {
   thinkingLevel: "none" | "low" | "medium" | "high" | "max";
   planningMode: boolean;
   customModels: { name: string; id: string }[];
+  theme: string;
+  mode: "local" | "cloud";
+  onboarded: boolean;
+  account?: { serverURL: string; username: string; token: string };
 }
 
 const CONFIG_FILE = path.join(os.homedir(), ".apex-agent.json");
