@@ -1,7 +1,9 @@
 import { loadConfig, saveConfig, type Config } from "./config";
-import { COLORS, printLogo, askQuestion, askConfirm, interactiveMenu, type MenuOption } from "./ui";
+import { COLORS, THEMES, applyTheme, printLogo, printBanner, askQuestion, askConfirm, interactiveMenu, type MenuOption } from "./ui";
 import { runAgentLoop, type Message, SYSTEM_PROMPT } from "./agent";
 import { fetchModels } from "./models";
+import { runOnboarding, loginFlow } from "./onboarding";
+import { logoutAccount, pushAccount, pullAccount, applySyncedData } from "./account";
 import path from "path";
 
 const COMMANDS: { name: string; desc: string }[] = [
@@ -9,6 +11,10 @@ const COMMANDS: { name: string; desc: string }[] = [
   { name: "/model", desc: "Switch the active model" },
   { name: "/think", desc: "Set reasoning depth" },
   { name: "/plan", desc: "Toggle planning mode" },
+  { name: "/theme", desc: "Change the color theme" },
+  { name: "/login", desc: "Log in / register an account" },
+  { name: "/sync", desc: "Sync settings with your account" },
+  { name: "/logout", desc: "Log out of your account" },
   { name: "/config", desc: "Open the setup wizard" },
   { name: "/clear", desc: "Clear the screen" },
   { name: "/exit", desc: "Quit FreeCode" },
@@ -127,6 +133,53 @@ async function handleCommand(input: string, config: Config): Promise<{ config: C
       }
       return { config, exit: false };
     }
+
+    case "/theme": {
+      const opts: MenuOption<string>[] = Object.entries(THEMES).map(([k, t]) => ({ label: t.label, value: k }));
+      const cur = opts.findIndex((o) => o.value === config.theme);
+      const picked = await interactiveMenu<string>("Color theme", opts, { initialIndex: cur >= 0 ? cur : 0 });
+      if (picked) {
+        config.theme = picked;
+        applyTheme(picked);
+        saveConfig(config);
+        console.clear();
+        printLogo(config.model, config.baseURL);
+        console.log(`${COLORS.green}Theme set to ${picked}.${COLORS.reset}`);
+      }
+      return { config, exit: false };
+    }
+    case "/login":
+      config = await loginFlow(config);
+      saveConfig(config);
+      applyTheme(config.theme);
+      if (config.mode === "cloud" && config.account?.token) {
+        try { await pushAccount(config); } catch {}
+      }
+      return { config, exit: false };
+    case "/logout":
+      await logoutAccount(config);
+      config.account = undefined;
+      config.mode = "local";
+      saveConfig(config);
+      console.log(`${COLORS.green}Logged out.${COLORS.reset}`);
+      return { config, exit: false };
+    case "/sync": {
+      if (!config.account?.token) {
+        console.log(`${COLORS.gray}Not logged in. Use /login first.${COLORS.reset}`);
+        return { config, exit: false };
+      }
+      try {
+        const remote = await pullAccount(config);
+        if (remote && Object.keys(remote).length) applySyncedData(config, remote);
+        await pushAccount(config);
+        saveConfig(config);
+        applyTheme(config.theme);
+        console.log(`${COLORS.green}✓ Settings synced.${COLORS.reset}`);
+      } catch (e: any) {
+        console.log(`${COLORS.red}${e?.message || e}${COLORS.reset}`);
+      }
+      return { config, exit: false };
+    }
     default:
       console.log(`${COLORS.red}Unknown command: ${cmd}${COLORS.reset} ${COLORS.gray}(type / and press Enter to browse)${COLORS.reset}`);
       return { config, exit: false };
@@ -176,6 +229,7 @@ async function runSetup(config: Config): Promise<Config> {
 
 async function main() {
   let config = await loadConfig();
+  applyTheme(config.theme);
   const argv = process.argv.slice(2);
 
   if (argv[0] === "--help" || argv[0] === "-h") {
@@ -187,7 +241,9 @@ async function main() {
     return;
   }
 
-  if (!config.apiKey) {
+  if (!config.onboarded) {
+    config = await runOnboarding(config);
+  } else if (!config.apiKey) {
     console.log(`${COLORS.gray}No API key found. Starting setup.${COLORS.reset}`);
     config = await runSetup(config);
   }

@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // src/config.ts
 import fs from "fs/promises";
 import path from "path";
@@ -11,7 +10,10 @@ var DEFAULT_CONFIG = {
   autoApprove: false,
   thinkingLevel: "medium",
   planningMode: false,
-  customModels: []
+  customModels: [],
+  theme: "ember",
+  mode: "local",
+  onboarded: false
 };
 async function loadConfig() {
   const envBaseURL = process.env.OPENAI_BASE_URL || process.env.APEX_BASE_URL;
@@ -31,7 +33,11 @@ async function loadConfig() {
     autoApprove: envAutoApprove || fileConfig.autoApprove || DEFAULT_CONFIG.autoApprove,
     thinkingLevel: fileConfig.thinkingLevel || DEFAULT_CONFIG.thinkingLevel,
     planningMode: fileConfig.planningMode !== void 0 ? fileConfig.planningMode : DEFAULT_CONFIG.planningMode,
-    customModels: fileConfig.customModels || DEFAULT_CONFIG.customModels
+    customModels: fileConfig.customModels || DEFAULT_CONFIG.customModels,
+    theme: fileConfig.theme || DEFAULT_CONFIG.theme,
+    mode: fileConfig.mode || DEFAULT_CONFIG.mode,
+    onboarded: fileConfig.onboarded !== void 0 ? fileConfig.onboarded : DEFAULT_CONFIG.onboarded,
+    account: fileConfig.account
   };
   return config;
 }
@@ -59,6 +65,35 @@ var COLORS = {
   orange: "\x1B[38;5;208m",
   dimOrange: "\x1B[38;5;130m"
 };
+var THEMES = {
+  ember: { label: "Ember \xB7 orange", accent: 208, dim: 130 },
+  ocean: { label: "Ocean \xB7 cyan", accent: 39, dim: 31 },
+  forest: { label: "Forest \xB7 green", accent: 42, dim: 28 },
+  grape: { label: "Grape \xB7 purple", accent: 141, dim: 97 },
+  crimson: { label: "Crimson \xB7 red", accent: 197, dim: 124 },
+  mono: { label: "Mono \xB7 gray", accent: 252, dim: 244 }
+};
+function applyTheme(name) {
+  const t = THEMES[name] || THEMES.ember;
+  COLORS.orange = `\x1B[38;5;${t.accent}m`;
+  COLORS.dimOrange = `\x1B[38;5;${t.dim}m`;
+}
+function printBanner(subtitle) {
+  const O = COLORS.orange, B = COLORS.bold, R = COLORS.reset, D = COLORS.dim;
+  const art = [
+    "\u2588\u2580\u2580 \u2588\u2580\u2584 \u2588\u2580\u2580 \u2588\u2580\u2580",
+    "\u2588\u2580  \u2588\u2580\u2584 \u2588\u2580  \u2588\u2580 ",
+    "\u2580   \u2580 \u2580 \u2580\u2580\u2580 \u2580\u2580\u2580",
+    "\u2588\u2580\u2580 \u2588\u2580\u2588 \u2588\u2580\u2584 \u2588\u2580\u2580",
+    "\u2588   \u2588 \u2588 \u2588 \u2588 \u2588\u2580 ",
+    "\u2580\u2580\u2580 \u2580\u2580\u2580 \u2580\u2580\u2580 \u2580\u2580\u2580"
+  ];
+  console.log("");
+  for (const line of art) console.log(`   ${B}${O}${line}${R}`);
+  if (subtitle) console.log(`
+   ${D}${subtitle}${R}`);
+  console.log("");
+}
 var spinnerInterval = null;
 var spinnerFrames = ["\u280B", "\u2819", "\u2839", "\u2838", "\u283C", "\u2834", "\u2826", "\u2827", "\u2807", "\u280F"];
 var spinnerFrameIndex = 0;
@@ -96,6 +131,39 @@ function askQuestion(query) {
       rl.close();
       resolve(answer);
     });
+  });
+}
+function askPassword(query) {
+  const stdin = process.stdin;
+  if (!stdin.isTTY) return askQuestion(query);
+  return new Promise((resolve) => {
+    let value = "";
+    process.stdout.write(query);
+    stdin.setRawMode(true);
+    stdin.resume();
+    const onData = (buf) => {
+      const ch = buf.toString("utf8");
+      if (ch === "\r" || ch === "\n") {
+        stdin.setRawMode(false);
+        stdin.removeListener("data", onData);
+        stdin.pause();
+        process.stdout.write("\n");
+        resolve(value);
+      } else if (ch === "") {
+        stdin.setRawMode(false);
+        process.stdout.write("\n");
+        process.exit(130);
+      } else if (ch === "\x7F" || ch === "\b") {
+        if (value.length > 0) {
+          value = value.slice(0, -1);
+          process.stdout.write("\b \b");
+        }
+      } else if (ch >= " ") {
+        value += ch;
+        process.stdout.write("\u2022");
+      }
+    };
+    stdin.on("data", onData);
   });
 }
 async function askConfirm(query, defaultYes = true) {
@@ -1422,12 +1490,175 @@ async function fetchModels(config) {
   return [];
 }
 
+// src/account.ts
+var DEFAULT_SERVER = "https://freecode-accounts.luchue117.workers.dev";
+var SYNC_KEYS = [
+  "baseURL",
+  "apiKey",
+  "model",
+  "autoApprove",
+  "thinkingLevel",
+  "planningMode",
+  "customModels",
+  "theme"
+];
+function syncableData(config) {
+  const out2 = {};
+  for (const k of SYNC_KEYS) out2[k] = config[k];
+  return out2;
+}
+function applySyncedData(config, data) {
+  for (const k of SYNC_KEYS) {
+    if (data[k] !== void 0) config[k] = data[k];
+  }
+}
+function serverURL(config) {
+  return config.account?.serverURL || DEFAULT_SERVER;
+}
+async function api(base, path3, method, body, token) {
+  const headers = { "content-type": "application/json" };
+  if (token) headers["authorization"] = `Bearer ${token}`;
+  const res = await fetch(`${base}${path3}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : void 0
+  });
+  let json = {};
+  try {
+    json = await res.json();
+  } catch {
+  }
+  return { ok: res.ok, status: res.status, json };
+}
+async function registerAccount(server, username, password) {
+  const r = await api(server, "/register", "POST", { username, password });
+  if (!r.ok) throw new Error(r.json?.error || `Register failed (${r.status})`);
+  return true;
+}
+async function loginAccount(server, username, password) {
+  const r = await api(server, "/login", "POST", { username, password });
+  if (!r.ok) throw new Error(r.json?.error || `Login failed (${r.status})`);
+  return { token: r.json.token, data: r.json.data || {} };
+}
+async function logoutAccount(config) {
+  if (!config.account?.token) return;
+  await api(serverURL(config), "/logout", "POST", void 0, config.account.token).catch(() => {
+  });
+}
+async function pushAccount(config) {
+  if (!config.account?.token) throw new Error("Not logged in");
+  const r = await api(serverURL(config), "/account", "PUT", { data: syncableData(config) }, config.account.token);
+  if (!r.ok) throw new Error(r.json?.error || `Sync failed (${r.status})`);
+  return true;
+}
+async function pullAccount(config) {
+  if (!config.account?.token) throw new Error("Not logged in");
+  const r = await api(serverURL(config), "/account", "GET", void 0, config.account.token);
+  if (!r.ok) throw new Error(r.json?.error || `Fetch failed (${r.status})`);
+  return r.json.data || {};
+}
+
+// src/onboarding.ts
+async function runOnboarding(config) {
+  console.clear();
+  printBanner("Welcome \u2014 let's set up FreeCode");
+  const themeOpts = Object.entries(THEMES).map(
+    ([k, t]) => ({ label: t.label, value: k })
+  );
+  const curTheme = themeOpts.findIndex((o) => o.value === config.theme);
+  const theme = await interactiveMenu("Choose a color theme", themeOpts, {
+    initialIndex: curTheme >= 0 ? curTheme : 0
+  });
+  if (theme) {
+    config.theme = theme;
+    applyTheme(theme);
+  }
+  console.clear();
+  printBanner("Theme applied \u2014 looking good");
+  const mode = await interactiveMenu(
+    "How do you want to use FreeCode?",
+    [
+      { label: "Local only", value: "local", hint: "settings stored on this machine" },
+      { label: "With an account", value: "cloud", hint: "sync settings across devices" }
+    ],
+    { initialIndex: config.mode === "cloud" ? 1 : 0 }
+  );
+  config.mode = mode || "local";
+  if (config.mode === "cloud") config = await loginFlow(config);
+  config = await setupApi(config);
+  config.autoApprove = await askConfirm("Auto-approve tool actions?", config.autoApprove);
+  config.onboarded = true;
+  await saveConfig(config);
+  if (config.mode === "cloud" && config.account?.token) {
+    try {
+      await pushAccount(config);
+    } catch {
+    }
+  }
+  console.log(`
+${COLORS.green}\u2713 Setup complete. Launching FreeCode\u2026${COLORS.reset}
+`);
+  return config;
+}
+async function loginFlow(config) {
+  const server = config.account?.serverURL || DEFAULT_SERVER;
+  while (true) {
+    const action = await interactiveMenu("Account", [
+      { label: "Log in", value: "login", hint: "existing account" },
+      { label: "Register", value: "register", hint: "create a new account" },
+      { label: "Skip for now", value: "skip", hint: "stay local" }
+    ], {});
+    if (!action || action === "skip") {
+      config.mode = "local";
+      return config;
+    }
+    const username = (await askQuestion(`${COLORS.orange}Username${COLORS.reset}: `)).trim();
+    const password = (await askPassword(`${COLORS.orange}Password${COLORS.reset}: `)).trim();
+    if (!username || !password) {
+      console.log(`${COLORS.red}Username and password are required.${COLORS.reset}`);
+      continue;
+    }
+    try {
+      if (action === "register") {
+        await registerAccount(server, username, password);
+        console.log(`${COLORS.green}Account created.${COLORS.reset}`);
+      }
+      const { token, data } = await loginAccount(server, username, password);
+      config.account = { serverURL: server, username, token };
+      config.mode = "cloud";
+      if (data && Object.keys(data).length) applySyncedData(config, data);
+      console.log(`${COLORS.green}\u2713 Logged in as ${username}.${COLORS.reset}`);
+      return config;
+    } catch (e) {
+      console.log(`${COLORS.red}${e?.message || e}${COLORS.reset}`);
+      const retry = await askConfirm("Try again?", true);
+      if (!retry) {
+        config.mode = "local";
+        return config;
+      }
+    }
+  }
+}
+async function setupApi(config) {
+  console.log(`
+${COLORS.bold}${COLORS.orange}API connection${COLORS.reset}`);
+  const baseURL = await askQuestion(`API base URL ${COLORS.gray}(${config.baseURL})${COLORS.reset}: `);
+  if (baseURL.trim()) config.baseURL = baseURL.trim();
+  const apiKey = await askPassword(`API key ${COLORS.gray}(${config.apiKey ? "keep current" : "required"})${COLORS.reset}: `);
+  if (apiKey.trim()) config.apiKey = apiKey.trim();
+  return config;
+}
+
 // src/index.ts
 var COMMANDS = [
   { name: "/help", desc: "Show help and commands" },
   { name: "/model", desc: "Switch the active model" },
   { name: "/think", desc: "Set reasoning depth" },
   { name: "/plan", desc: "Toggle planning mode" },
+  { name: "/theme", desc: "Change the color theme" },
+  { name: "/login", desc: "Log in / register an account" },
+  { name: "/sync", desc: "Sync settings with your account" },
+  { name: "/logout", desc: "Log out of your account" },
   { name: "/config", desc: "Open the setup wizard" },
   { name: "/clear", desc: "Clear the screen" },
   { name: "/exit", desc: "Quit FreeCode" }
@@ -1541,6 +1772,55 @@ async function handleCommand(input, config) {
       }
       return { config, exit: false };
     }
+    case "/theme": {
+      const opts = Object.entries(THEMES).map(([k, t]) => ({ label: t.label, value: k }));
+      const cur = opts.findIndex((o) => o.value === config.theme);
+      const picked = await interactiveMenu("Color theme", opts, { initialIndex: cur >= 0 ? cur : 0 });
+      if (picked) {
+        config.theme = picked;
+        applyTheme(picked);
+        saveConfig(config);
+        console.clear();
+        printLogo(config.model, config.baseURL);
+        console.log(`${COLORS.green}Theme set to ${picked}.${COLORS.reset}`);
+      }
+      return { config, exit: false };
+    }
+    case "/login":
+      config = await loginFlow(config);
+      saveConfig(config);
+      applyTheme(config.theme);
+      if (config.mode === "cloud" && config.account?.token) {
+        try {
+          await pushAccount(config);
+        } catch {
+        }
+      }
+      return { config, exit: false };
+    case "/logout":
+      await logoutAccount(config);
+      config.account = void 0;
+      config.mode = "local";
+      saveConfig(config);
+      console.log(`${COLORS.green}Logged out.${COLORS.reset}`);
+      return { config, exit: false };
+    case "/sync": {
+      if (!config.account?.token) {
+        console.log(`${COLORS.gray}Not logged in. Use /login first.${COLORS.reset}`);
+        return { config, exit: false };
+      }
+      try {
+        const remote = await pullAccount(config);
+        if (remote && Object.keys(remote).length) applySyncedData(config, remote);
+        await pushAccount(config);
+        saveConfig(config);
+        applyTheme(config.theme);
+        console.log(`${COLORS.green}\u2713 Settings synced.${COLORS.reset}`);
+      } catch (e) {
+        console.log(`${COLORS.red}${e?.message || e}${COLORS.reset}`);
+      }
+      return { config, exit: false };
+    }
     default:
       console.log(`${COLORS.red}Unknown command: ${cmd}${COLORS.reset} ${COLORS.gray}(type / and press Enter to browse)${COLORS.reset}`);
       return { config, exit: false };
@@ -1592,6 +1872,7 @@ ${COLORS.bold}${COLORS.orange}[Config] FreeCode Config Wizard${COLORS.reset}
 }
 async function main() {
   let config = await loadConfig();
+  applyTheme(config.theme);
   const argv = process.argv.slice(2);
   if (argv[0] === "--help" || argv[0] === "-h") {
     showHelp();
@@ -1601,7 +1882,9 @@ async function main() {
     config = await runSetup(config);
     return;
   }
-  if (!config.apiKey) {
+  if (!config.onboarded) {
+    config = await runOnboarding(config);
+  } else if (!config.apiKey) {
     console.log(`${COLORS.gray}No API key found. Starting setup.${COLORS.reset}`);
     config = await runSetup(config);
   }

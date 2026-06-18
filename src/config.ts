@@ -26,6 +26,9 @@ const DEFAULT_CONFIG: Config = {
   thinkingLevel: "medium",
   planningMode: false,
   customModels: [],
+  theme: "ember",
+  mode: "local",
+  onboarded: false,
 };
 
 export async function loadConfig(): Promise<Config> {
@@ -50,6 +53,10 @@ export async function loadConfig(): Promise<Config> {
     thinkingLevel: fileConfig.thinkingLevel || DEFAULT_CONFIG.thinkingLevel,
     planningMode: fileConfig.planningMode !== undefined ? fileConfig.planningMode : DEFAULT_CONFIG.planningMode,
     customModels: fileConfig.customModels || DEFAULT_CONFIG.customModels,
+    theme: fileConfig.theme || DEFAULT_CONFIG.theme,
+    mode: fileConfig.mode || DEFAULT_CONFIG.mode,
+    onboarded: fileConfig.onboarded !== undefined ? fileConfig.onboarded : DEFAULT_CONFIG.onboarded,
+    account: fileConfig.account,
   };
 
   return config;
