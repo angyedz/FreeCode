@@ -20,6 +20,39 @@ export const COLORS = {
   dimOrange: "\x1b[38;5;130m",
 };
 
+// Color themes — mutate the accent (orange) used across the whole UI.
+export const THEMES: Record<string, { label: string; accent: number; dim: number }> = {
+  ember: { label: "Ember · orange", accent: 208, dim: 130 },
+  ocean: { label: "Ocean · cyan", accent: 39, dim: 31 },
+  forest: { label: "Forest · green", accent: 42, dim: 28 },
+  grape: { label: "Grape · purple", accent: 141, dim: 97 },
+  crimson: { label: "Crimson · red", accent: 197, dim: 124 },
+  mono: { label: "Mono · gray", accent: 252, dim: 244 },
+};
+
+export function applyTheme(name: string) {
+  const t = THEMES[name] || THEMES.ember;
+  COLORS.orange = `\x1b[38;5;${t.accent}m`;
+  COLORS.dimOrange = `\x1b[38;5;${t.dim}m`;
+}
+
+// Large centered mascot banner for onboarding / welcome screens.
+export function printBanner(subtitle?: string) {
+  const O = COLORS.orange, B = COLORS.bold, R = COLORS.reset, D = COLORS.dim;
+  const art = [
+    "█▀▀ █▀▄ █▀▀ █▀▀",
+    "█▀  █▀▄ █▀  █▀ ",
+    "▀   ▀ ▀ ▀▀▀ ▀▀▀",
+    "█▀▀ █▀█ █▀▄ █▀▀",
+    "█   █ █ █ █ █▀ ",
+    "▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀",
+  ];
+  console.log("");
+  for (const line of art) console.log(`   ${B}${O}${line}${R}`);
+  if (subtitle) console.log(`\n   ${D}${subtitle}${R}`);
+  console.log("");
+}
+
 // Spinner Management
 let spinnerInterval: any = null;
 const spinnerFrames = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"];
@@ -66,6 +99,41 @@ export function askQuestion(query: string): Promise<string> {
       rl.close();
       resolve(answer);
     });
+  });
+}
+
+// Masked password input (echoes • per char). Falls back to plain when not a TTY.
+export function askPassword(query: string): Promise<string> {
+  const stdin: any = process.stdin;
+  if (!stdin.isTTY) return askQuestion(query);
+  return new Promise((resolve) => {
+    let value = "";
+    process.stdout.write(query);
+    stdin.setRawMode(true);
+    stdin.resume();
+    const onData = (buf: Buffer) => {
+      const ch = buf.toString("utf8");
+      if (ch === "\r" || ch === "\n") {
+        stdin.setRawMode(false);
+        stdin.removeListener("data", onData);
+        stdin.pause();
+        process.stdout.write("\n");
+        resolve(value);
+      } else if (ch === "\u0003") {
+        stdin.setRawMode(false);
+        process.stdout.write("\n");
+        process.exit(130);
+      } else if (ch === "\u007f" || ch === "\b") {
+        if (value.length > 0) {
+          value = value.slice(0, -1);
+          process.stdout.write("\b \b");
+        }
+      } else if (ch >= " ") {
+        value += ch;
+        process.stdout.write("\u2022");
+      }
+    };
+    stdin.on("data", onData);
   });
 }
 
