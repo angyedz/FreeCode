@@ -26,6 +26,9 @@ const DEFAULT_CONFIG: Config = {
   thinkingLevel: "medium",
   planningMode: false,
   customModels: [],
+  theme: "ember",
+  mode: "local",
+  onboarded: false,
 };
 
 export async function loadConfig(): Promise<Config> {
