@@ -2,8 +2,12 @@ import fs from "fs/promises";
 import path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
+import { recordBackup } from "./checkpoints";
+import { resolveSafePath, getSafeRoot, wrapUntrusted, stripActiveHtml } from "./security";
 
 const execPromise = promisify(exec);
+const MAX_CMD_OUTPUT = 1024 * 1024; // 1MB cap on captured stdout/stderr
+const CMD_TIMEOUT_MS = 120000;      // 2 min wall-clock cap per command
 
 // Define the tool interfaces that will be sent to the OpenAI compatible API
 export const toolDefinitions = [
@@ -320,8 +324,8 @@ function globToRegex(pattern: string): RegExp {
 
 // Tool implementations
 export async function listDir(dirPath = "."): Promise<string> {
-  const target = path.resolve(process.cwd(), dirPath);
   try {
+    const target = await resolveSafePath(dirPath);
     const entries = await fs.readdir(target, { withFileTypes: true });
     const formatted = entries.map((entry) => {
       const type = entry.isDirectory() ? "[DIR]" : "[FILE]";
@@ -348,8 +352,8 @@ export async function findFiles(pattern: string): Promise<string> {
 }
 
 export async function viewFile(filePath: string, startLine?: number, endLine?: number): Promise<string> {
-  const target = path.resolve(process.cwd(), filePath);
   try {
+    const target = await resolveSafePath(filePath);
     const content = await fs.readFile(target, "utf-8");
     const lines = content.split("\n");
     
@@ -371,8 +375,9 @@ export async function viewFile(filePath: string, startLine?: number, endLine?: n
 }
 
 export async function writeFile(filePath: string, content: string): Promise<string> {
-  const target = path.resolve(process.cwd(), filePath);
   try {
+    const target = await resolveSafePath(filePath);
+    await recordBackup(target);
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, content, "utf-8");
     return `Successfully wrote file: ${filePath}`;
@@ -382,8 +387,8 @@ export async function writeFile(filePath: string, content: string): Promise<stri
 }
 
 export async function patchFile(filePath: string, search: string, replace: string): Promise<string> {
-  const target = path.resolve(process.cwd(), filePath);
   try {
+    const target = await resolveSafePath(filePath);
     const content = await fs.readFile(target, "utf-8");
     
     const occurrences = content.split(search).length - 1;
@@ -395,6 +400,7 @@ export async function patchFile(filePath: string, search: string, replace: strin
     }
     
     const newContent = content.replace(search, replace);
+    await recordBackup(target);
     await fs.writeFile(target, newContent, "utf-8");
     return `Successfully patched file: ${filePath}`;
   } catch (e: any) {
@@ -402,12 +408,30 @@ export async function patchFile(filePath: string, search: string, replace: strin
   }
 }
 
-export async function runCommand(command: string): Promise<string> {
+export async function runCommand(
+  command: string,
+  options?: { timeoutMs?: number; maxBytes?: number }
+): Promise<string> {
+  const timeout = options?.timeoutMs ?? CMD_TIMEOUT_MS;
+  const maxBuffer = options?.maxBytes ?? MAX_CMD_OUTPUT;
   try {
-    const { stdout, stderr } = await execPromise(command, { cwd: process.cwd() });
+    const { stdout, stderr } = await execPromise(command, {
+      cwd: getSafeRoot(),
+      timeout,
+      maxBuffer,
+      killSignal: "SIGKILL",
+    });
     return `Command: ${command}\nExit Code: 0\n\nStdout:\n${stdout || "(none)"}\n\nStderr:\n${stderr || "(none)"}`;
   } catch (e: any) {
-    return `Command: ${command}\nExit Code: ${e.code ?? 1}\n\nStdout:\n${e.stdout || "(none)"}\n\nStderr:\n${e.stderr || "(none)"}`;
+    let note = "";
+    if (e.killed || e.signal === "SIGKILL" || e.signal === "SIGTERM") {
+      note = `\n\n[Process terminated: exceeded ${timeout}ms timeout]`;
+    } else if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+      note = `\n\n[Output truncated: exceeded ${maxBuffer} byte cap]`;
+    }
+    const stdout = typeof e.stdout === "string" ? e.stdout : "";
+    const stderr = typeof e.stderr === "string" ? e.stderr : "";
+    return `Command: ${command}\nExit Code: ${e.code ?? 1}\n\nStdout:\n${stdout || "(none)"}\n\nStderr:\n${stderr || "(none)"}${note}`;
   }
 }
 
@@ -449,7 +473,8 @@ export async function webSearch(query: string): Promise<string> {
       return "No results found.";
     }
     
-    return results.map((r, idx) => `[${idx + 1}] ${r.title}\nURL: ${r.link}\nSnippet: ${r.snippet}\n`).join("\n");
+    const body = results.map((r, idx) => `[${idx + 1}] ${r.title}\nURL: ${r.link}\nSnippet: ${r.snippet}\n`).join("\n");
+    return wrapUntrusted("web_search:duckduckgo", body);
   } catch (e: any) {
     return `Error performing search: ${e.message}`;
   }
@@ -467,8 +492,7 @@ export async function fetchUrl(targetUrl: string): Promise<string> {
     }
     const html = await response.text();
     
-    let text = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
-    text = text.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "");
+    let text = stripActiveHtml(html);
     text = text.replace(/<[^>]+>/g, " ");
     text = text
       .replace(/&quot;/g, '"')
@@ -478,11 +502,11 @@ export async function fetchUrl(targetUrl: string): Promise<string> {
       .replace(/&nbsp;/g, ' ');
       
     const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-    const cleaned = lines.join("\n");
+    let cleaned = lines.join("\n");
     if (cleaned.length > 8000) {
-      return cleaned.slice(0, 8000) + "\n\n... [Content truncated due to length]";
+      cleaned = cleaned.slice(0, 8000) + "\n\n... [Content truncated due to length]";
     }
-    return cleaned;
+    return wrapUntrusted(`fetch_url:${targetUrl}`, cleaned);
   } catch (e: any) {
     return `Error fetching URL: ${e.message}`;
   }
@@ -537,8 +561,8 @@ export async function grepSearch(pattern: string, globPattern?: string): Promise
 }
 
 export async function createDir(dirPath: string): Promise<string> {
-  const target = path.resolve(process.cwd(), dirPath);
   try {
+    const target = await resolveSafePath(dirPath);
     await fs.mkdir(target, { recursive: true });
     return `Successfully created directory: ${dirPath}`;
   } catch (e: any) {
@@ -547,8 +571,9 @@ export async function createDir(dirPath: string): Promise<string> {
 }
 
 export async function deleteFile(filePath: string): Promise<string> {
-  const target = path.resolve(process.cwd(), filePath);
   try {
+    const target = await resolveSafePath(filePath);
+    await recordBackup(target);
     await fs.rm(target, { recursive: true, force: true });
     return `Successfully deleted: ${filePath}`;
   } catch (e: any) {
@@ -557,9 +582,11 @@ export async function deleteFile(filePath: string): Promise<string> {
 }
 
 export async function moveFile(sourcePath: string, destPath: string): Promise<string> {
-  const source = path.resolve(process.cwd(), sourcePath);
-  const dest = path.resolve(process.cwd(), destPath);
   try {
+    const source = await resolveSafePath(sourcePath);
+    const dest = await resolveSafePath(destPath);
+    await recordBackup(source);
+    await recordBackup(dest);
     await fs.mkdir(path.dirname(dest), { recursive: true });
     await fs.rename(source, dest);
     return `Successfully moved/renamed ${sourcePath} to ${destPath}`;
@@ -569,8 +596,9 @@ export async function moveFile(sourcePath: string, destPath: string): Promise<st
 }
 
 export async function appendFile(filePath: string, content: string): Promise<string> {
-  const target = path.resolve(process.cwd(), filePath);
   try {
+    const target = await resolveSafePath(filePath);
+    await recordBackup(target);
     await fs.appendFile(target, content, "utf-8");
     return `Successfully appended content to ${filePath}`;
   } catch (e: any) {
@@ -579,8 +607,8 @@ export async function appendFile(filePath: string, content: string): Promise<str
 }
 
 export async function listDirRecursive(dirPath = "."): Promise<string> {
-  const target = path.resolve(process.cwd(), dirPath);
   try {
+    const target = await resolveSafePath(dirPath);
     const files = await walk(target);
     const rel = files.map(f => path.relative(target, f));
     return rel.join("\n") || "(empty or no files)";
